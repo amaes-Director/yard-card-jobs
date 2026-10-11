@@ -97,6 +97,8 @@ details.cat summary .n{font-weight:600;color:var(--ink-3);font-size:12.5px}
 .banner{border-radius:12px;padding:10px 12px;font-size:13.5px;margin-block:4px 12px;background:var(--pop-soft);color:var(--ink)}
 .banner.warn{background:var(--warn-soft)}
 .banner b{font-weight:700}
+.btn.keep{flex-direction:column;gap:2px}.btn.keep .fine{font-weight:400;color:inherit;opacity:.85}
+.linkbtn{background:none;border:0;padding:0;font:inherit;font-weight:700;color:inherit;text-decoration:underline;cursor:pointer}
 
 /* sections & job cards */
 .sec{margin-block:18px 8px;display:flex;align-items:baseline;justify-content:space-between;gap:8px}
@@ -268,28 +270,161 @@ const store = {
     else{
       const i = this.jobs.findIndex(j=>j.id===id);
       if(i<0) this.jobs.push(job); else this.jobs[i] = job;
-      this.local("ycj-jobs", this.jobs); this.emit();
+      this.local("ycj-jobs", this.jobs); sync.mark("job:"+id); this.emit();
     }
   },
   async removeJob(id){
     if(this.db){ await this.db.doc("jobs/"+id).delete(); }
-    else{ this.jobs = this.jobs.filter(j=>j.id!==id); this.local("ycj-jobs", this.jobs); this.emit(); }
+    else{ this.jobs = this.jobs.filter(j=>j.id!==id); this.local("ycj-jobs", this.jobs); sync.mark("job:"+id, true); this.emit(); }
   },
   async saveSettings(s){
     if(this.db){ await this.db.doc("settings/business").set(s); this.settings = s; }
-    else{ this.settings = s; this.local("ycj-settings", s); this.emit(); }
+    else{ s.updatedAt = new Date().toISOString(); this.settings = s; this.local("ycj-settings", s); sync.mark("settings:business"); this.emit(); }
   },
   async saveExample(ex){
+    if(!this.db) ex.updatedAt = new Date().toISOString();
     const {id, ...data} = ex;
     if(this.db){ await this.db.doc("examples/"+id).set(JSON.parse(JSON.stringify(data))); }
     const i = this.examples.findIndex(x=>x.id===id);
     if(i<0) this.examples.push(ex); else this.examples[i] = ex;
-    if(!this.db){ this.local("ycj-examples", this.examples); this.emit(); }
+    if(!this.db){ this.local("ycj-examples", this.examples); sync.mark("example:"+id); this.emit(); }
   },
   async removeExample(id){
     if(this.db){ await this.db.doc("examples/"+id).delete(); }
     this.examples = this.examples.filter(x=>x.id!==id);
-    if(!this.db){ this.local("ycj-examples", this.examples); this.emit(); }
+    if(!this.db){ this.local("ycj-examples", this.examples); sync.mark("example:"+id, true); this.emit(); }
+  }
+};
+
+
+/* ---------- Drive sync: only in this-browser mode, once a sync address and code are entered ----------
+   Each job, example and the business details is sent on its own with the version this device
+   last saw from Drive. Drive refuses a change when another device changed the same thing first,
+   and the app then asks which version to keep. */
+const sync = {
+  busy:false, failed:false, timer:null, tries:0, lastOk:0,
+  cfg(){ const c = store.local("ycj-sync"); return c && c.url && c.code ? c : null; },
+  st(){ const v = store.local("ycj-sync-state") || {}; return {since:0, base:{}, pending:{}, conflicts:[], ...v}; },
+  save(v){ store.local("ycj-sync-state", v); },
+  waiting(){ return Object.keys(this.st().pending).length; },
+  mark(key, deleted){
+    if(!this.cfg()) return;
+    const v = this.st();
+    v.pending[key] = {deleted: !!deleted, at: new Date().toISOString()};
+    this.save(v); this.soon(800);
+  },
+  // What this device has now for a key, in the shape Drive keeps.
+  rec(key, p){
+    const [kind, id] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":")+1)];
+    if(p.deleted) return {updatedAt: p.at, deleted:true};
+    const item = kind==="job" ? store.jobs.find(x=>x.id===id) : kind==="example" ? store.examples.find(x=>x.id===id) : store.settings;
+    if(!item) return {updatedAt: p.at, deleted:true};
+    return {updatedAt: item.updatedAt || p.at, data: item};
+  },
+  apply(key, rec){
+    const kind = key.slice(0, key.indexOf(":")), id = key.slice(key.indexOf(":")+1);
+    if(kind==="settings"){ if(!rec.deleted){ store.settings = {...DEFAULT_SETTINGS, ...rec.data}; store.local("ycj-settings", store.settings); } return; }
+    const list = kind==="job" ? "jobs" : "examples";
+    let arr = store[list].filter(x=>x.id!==id);
+    if(!rec.deleted) arr.push({...rec.data, id});
+    store[list] = arr; store.local(kind==="job" ? "ycj-jobs" : "ycj-examples", arr);
+  },
+  soon(ms){ clearTimeout(this.timer); this.timer = setTimeout(()=>this.run(), ms); },
+  async run(){
+    const c = this.cfg(); if(!c || this.busy) return;
+    if(navigator.onLine===false){ this.failed = true; store.emit(); return; }
+    this.busy = true;
+    let v = this.st(), changed = false;
+    const sent = {};
+    const changes = Object.keys(v.pending).filter(k=>!v.conflicts.some(x=>x.key===k)).map(k=>{ const rec = this.rec(k, v.pending[k]); sent[k] = rec.updatedAt; return {key:k, base: v.base[k]||null, rec}; });
+    try{
+      const r = await fetch(c.url, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body: JSON.stringify({code:c.code, since:v.since, changes}), redirect:"follow"});
+      const out = await r.json();
+      if(!out.ok) throw Object.assign(new Error(out.error||"failed"), {code: out.error});
+      v = this.st(); // re-read: the person may have saved something while this was sending
+      const clash = new Set((out.conflicts||[]).map(x=>x.key));
+      (out.conflicts||[]).forEach(x=>{
+        // A device that never had business details just takes the ones from Drive.
+        if(x.key==="settings:business" && !store.settings.name && x.theirs){ this.apply(x.key, x.theirs); v.base[x.key] = x.theirs.updatedAt; delete v.pending[x.key]; changed = true; return; }
+        if(!v.conflicts.some(y=>y.key===x.key)) v.conflicts.push(x);
+      });
+      Object.keys(sent).forEach(k=>{
+        if(clash.has(k)) return;
+        v.base[k] = sent[k];
+        const now = v.pending[k] && this.rec(k, v.pending[k]).updatedAt;
+        if(now===sent[k]) delete v.pending[k];
+      });
+      (out.items||[]).forEach(({key, rec})=>{
+        if(!rec || clash.has(key) || v.conflicts.some(x=>x.key===key)) return;
+        if(v.pending[key]){ return; } // changed here again since sending; it goes up next round
+        if(v.base[key]===rec.updatedAt) return;
+        this.apply(key, rec); v.base[key] = rec.updatedAt; changed = true;
+      });
+      v.since = out.rev || v.since;
+      v.badCode = false;
+      this.save(v); this.failed = false; this.tries = 0; this.lastOk = Date.now();
+      this.busy = false;
+      if(changed || clash.size || changes.length) store.emit();
+      if(out.more || Object.keys(v.pending).some(k=>!v.conflicts.some(x=>x.key===k))) this.soon(300);
+      if(v.conflicts.length) this.ask();
+    }catch(e){
+      this.busy = false; this.failed = true; this.tries++;
+      if(e && e.code==="code"){ const w = this.st(); w.badCode = true; this.save(w); store.emit(); return; }
+      store.emit();
+      this.soon(Math.min(60000, 3000 * Math.pow(2, this.tries-1)));
+    }
+  },
+  // Turned on from Business → Drive sync. Everything already on this device goes up once.
+  connect(url, code){
+    store.local("ycj-sync", {url, code});
+    const v = this.st(), at = new Date().toISOString();
+    v.badCode = false;
+    const add = k=>{ if(!(k in v.base) && !v.pending[k]) v.pending[k] = {deleted:false, at}; };
+    store.jobs.forEach(j=>add("job:"+j.id));
+    store.examples.forEach(x=>add("example:"+x.id));
+    if(store.settings.name || store.settings.updatedAt) add("settings:business");
+    this.save(v); this.tries = 0; this.run();
+  },
+  disconnect(){ store.local("ycj-sync", {}); store.local("ycj-sync-state", {}); this.failed = false; store.emit(); },
+  // Problems worth a line on the Jobs screen. Nothing shows while everything is saved in Drive.
+  banner(){
+    if(!this.cfg()) return "";
+    const v = this.st();
+    if(v.badCode) return `<div class="banner warn"><b>Drive sync stopped.</b> The sync code doesn't match. Check it under Business → Drive sync.</div>`;
+    if(v.conflicts.length) return `<div class="banner warn"><b>A job was changed on two devices.</b> <button type="button" class="linkbtn" data-sync-ask>Choose which to keep</button></div>`;
+    const n = Object.keys(v.pending).length;
+    if(n && (this.failed || navigator.onLine===false)) return `<div class="banner warn"><b>${n} ${n===1?"change":"changes"} waiting for signal.</b> Don't clear this browser until this message goes away.</div>`;
+    return "";
+  },
+  ask(){
+    const v = this.st(), x = v.conflicts[0]; if(!x) return;
+    const root = $("#sheet-root"); if(root.innerHTML) return;
+    const kind = x.key.slice(0, x.key.indexOf(":")), id = x.key.slice(x.key.indexOf(":")+1);
+    const mine = kind==="job" ? store.jobs.find(j=>j.id===id) : kind==="example" ? store.examples.find(e=>e.id===id) : store.settings;
+    const theirs = x.theirs || {};
+    const what = kind==="settings" ? "Your business details" : kind==="example" ? "An example photo" : "The job for " + ((mine&&mine.honoree)||(theirs.data&&theirs.data.honoree)||"a customer");
+    const desc = (rec, item)=> rec && rec.deleted || !item ? "Deleted on that device" : (kind==="job" && item.message ? `“${esc(item.message)}” · ` : kind==="settings" && item.name ? esc(item.name)+" · " : "") + "changed " + esc(fmtTime(item.updatedAt));
+    root.innerHTML = `<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-h">
+      <h3 id="sheet-h">Which version should we keep?</h3>
+      <p class="fine">${esc(what)} was changed on this device and on another device before they synced.</p>
+      <div class="row">
+        <button type="button" class="btn primary wide keep" data-keep="mine">Keep this device's<span class="fine">${desc(null, mine)}</span></button>
+        <button type="button" class="btn wide keep" data-keep="theirs">Keep the other device's<span class="fine">${desc(theirs, theirs.data)}</span></button>
+      </div>
+    </div></div>`;
+    root.querySelectorAll("[data-keep]").forEach(b=>b.onclick=()=>{
+      const w = this.st();
+      w.conflicts = w.conflicts.filter(y=>y.key!==x.key);
+      if(b.dataset.keep==="mine"){
+        w.base[x.key] = theirs.updatedAt || null;
+        if(!w.pending[x.key]) w.pending[x.key] = {deleted:!mine, at:new Date().toISOString()};
+      }else{
+        delete w.pending[x.key];
+        if(x.theirs){ this.apply(x.key, x.theirs); w.base[x.key] = x.theirs.updatedAt; }
+      }
+      this.save(w); root.innerHTML = ""; toast("Kept"); store.emit(); render();
+      if(w.conflicts.length) setTimeout(()=>this.ask(), 300); else this.run();
+    });
   }
 };
 
@@ -428,7 +563,11 @@ function topBar(title, sub, back){
   </header>`;
 }
 function modeBanner(){
-  if(store.mode==="local") return route.view==="jobs" ? `<div class="banner">Your jobs are saved on this phone, in this browser. Open the app the same way each time, or add it to your home screen.</div>` : "";
+  if(store.mode==="local"){
+    if(route.view!=="jobs") return "";
+    if(sync.cfg()) return sync.banner();
+    return `<div class="banner">Your jobs are saved on this phone, in this browser. Open the app the same way each time, or add it to your home screen.</div>`;
+  }
   if(store.mode==="db-error") return `<div class="banner warn"><b>Lost connection to your saved jobs.</b> Reload the page to reconnect.</div>`;
   return "";
 }
@@ -726,8 +865,19 @@ function viewSettings(){
       <p class="fine" style="margin:0">How many of each sign you own. The list comes from your sign checklist under <b>Crew</b>, so add or rename signs there. Each job then shows how many are free on its dates.</p>
       ${inventoryRows()}
     </fieldset>
+    ${store.mode==="local" ? syncFieldset() : ""}
     <button class="btn primary wide" type="submit">Save business details</button>
   </form>`;
+}
+function syncFieldset(){
+  const c = store.local("ycj-sync") || {}, on = sync.cfg(), v = sync.st();
+  const state = !on ? "Not set up. Jobs are only on this device." : v.badCode ? "Stopped: the sync code doesn't match." : sync.waiting() ? `${sync.waiting()} waiting to sync.` : sync.lastOk ? "✓ Everything is saved in Drive." : "Connected.";
+  return `<fieldset><legend>Drive sync</legend>
+      <p class="fine" style="margin:0">Keeps this device and your other devices in step through your Google Drive, and keeps a copy there if this browser is ever cleared. Use the same address and code on each device.</p>
+      <label>Sync address<input id="sy-url" type="url" inputmode="url" value="${esc(c.url||pendingSyncUrl||"")}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
+      <label>Sync code<input id="sy-code" type="password" inputmode="numeric" value="${esc(c.code||"")}" autocomplete="off"></label>
+      <p class="fine" id="sy-state" style="margin:0">${esc(state)}</p>
+    </fieldset>`;
 }
 
 function inventoryRows(){
@@ -797,6 +947,7 @@ function bind(j){
   const app = $("#app");
   app.querySelectorAll("[data-back]").forEach(b=>b.onclick=()=>go(route.view==="edit"&&j?"job":"jobs", route.view==="edit"&&j?j.id:null));
   app.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>go("job", b.dataset.open));
+  app.querySelectorAll("[data-sync-ask]").forEach(b=>b.onclick=()=>sync.ask());
   app.querySelectorAll("[data-go2]").forEach(b=>b.onclick=()=>go(b.dataset.go2));
   app.querySelectorAll("[data-remind]").forEach(b=>b.onclick=()=>{ const jj = store.jobs.find(x=>x.id===b.dataset.remind); if(jj) openMail("pickup", jj); });
   app.querySelectorAll("[data-crewopen]").forEach(b=>b.onclick=()=>{ const jj = store.jobs.find(x=>x.id===b.dataset.crewopen); if(jj) openCrew(jj); });
@@ -836,6 +987,17 @@ function bind(j){
       const inv = {};
       sf.querySelectorAll("[data-inv]").forEach(inp=>{ const v = inp.value.trim(); if(v!=="") inv[inp.dataset.inv] = Math.max(0, Math.min(999, parseInt(v,10)||0)); });
       s.inventory = inv;
+      const su = $("#sy-url"), sc = $("#sy-code");
+      if(su){
+        const url = su.value.trim(), code = sc.value.trim(), old = store.local("ycj-sync") || {};
+        if(url && !/^https:\/\/script\.google(usercontent)?\.com\//.test(url)){ toast("The sync address should start with https://script.google.com/"); su.focus(); return; }
+        if(url && !code){ toast("Enter the sync code too"); sc.focus(); return; }
+        if(!url && old.url){ sync.disconnect(); }
+        else if(url && (url!==old.url || code!==old.code)){ pendingSyncUrl = ""; sync.connect(url, code); }
+      }
+      // Only save when something changed, so connecting a new phone doesn't overwrite the business details in Drive.
+      const same = JSON.stringify({...s, updatedAt:0}) === JSON.stringify({...DEFAULT_SETTINGS, ...store.settings, updatedAt:0});
+      if(same){ toast("Business details saved"); return go("jobs"); }
       try{ await store.saveSettings(s); toast("Business details saved"); go("jobs"); }
       catch(ex){ toast("Couldn't save — try again"); }
     };
@@ -1322,8 +1484,26 @@ function mailError(e){
 
 /* ---------- boot ---------- */
 if("serviceWorker" in navigator && !window.claude && location.protocol==="https:") navigator.serviceWorker.register("sw.js").catch(()=>{});
+// A setup link (app/#sync=<address>) fills in the sync address, so it needn't be typed on a phone.
+let pendingSyncUrl = "";
+if(location.hash.startsWith("#sync=")){
+  pendingSyncUrl = decodeURIComponent(location.hash.slice(6));
+  history.replaceState(null, "", location.pathname + location.search);
+}
 render();
-store.init();
+store.init().then(()=>{
+  if(store.mode!=="local") return;
+  // Ask the browser to keep this app's saved jobs even when the phone runs low on space.
+  try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{}); }catch(e){}
+  if(pendingSyncUrl && !sync.cfg()){ go("settings"); toast("Enter your sync code, then Save business details"); setTimeout(()=>{ const c = $("#sy-code"); if(c) c.focus(); }, 300); }
+  sync.run();
+  const v = sync.st(); if(v.conflicts.length) setTimeout(()=>sync.ask(), 500);
+});
+addEventListener("online", ()=>{ sync.tries = 0; sync.run(); });
+addEventListener("offline", ()=>store.emit());
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) sync.run(); });
+// Check now and then for changes made on the other device.
+setInterval(()=>{ if(!document.hidden) sync.run(); }, 2*60*1000);
 // The "reminder due" alert depends on the clock, so refresh the Jobs list now and then.
 setInterval(()=>{ if(route.view==="jobs" && !document.hidden) render(); }, 5*60*1000);
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden && route.view==="jobs") render(); });
