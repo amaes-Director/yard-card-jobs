@@ -164,6 +164,7 @@ details.cat summary .n{font-weight:600;color:var(--ink-3);font-size:12.5px}
 form{display:grid;gap:14px}
 fieldset{border:0;padding:0;margin:0;display:grid;gap:12px}
 legend{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:700;margin-bottom:8px;padding:0}
+[hidden]{display:none!important}
 label{display:grid;gap:5px;font-size:13px;font-weight:600;color:var(--ink-2)}
 input,textarea,select{width:100%;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:11px 12px;font-size:16px;color:var(--ink)}
 textarea{min-height:88px;resize:vertical}
@@ -524,6 +525,56 @@ function smsHref(phone, text){
   const sep = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?";
   return "sms:" + String(phone||"").replace(/[^\d+]/g,"") + sep + "body=" + encodeURIComponent(text);
 }
+/* ---------- how to reach the customer ---------- */
+const CHANNELS = {email:"Email", text:"Text message", messenger:"Facebook Messenger"};
+function chanOf(j){ return CHANNELS[j.contact] ? j.contact : "email"; }
+function chanNoun(j){ return {email:"email", text:"text", messenger:"message"}[chanOf(j)]; }
+function messengerHref(v){
+  v = String(v||"").trim();
+  if(/^https?:\/\//i.test(v)) return v;
+  if(/^[A-Za-z0-9.]{3,}$/.test(v)) return "https://m.me/" + v;
+  return "";
+}
+
+/* ---------- social post drafts ---------- */
+const SAYINGS = {
+  birthday:["The yard got the memo: it's {name}'s birthday!","Cake inside, party outside. Happy birthday, {name}!","Warning: extreme levels of birthday ahead. Happy birthday, {name}!","Another trip around the sun deserves a front-yard parade!","This lawn is officially throwing a party for {name}!"],
+  graduation:["Tassel turned, yard decked out! Congrats, {name}!","The future's so bright, even the lawn is celebrating.","Hats off to {name}! This whole yard is proud of you.","Caps, gowns and front-lawn crowns. Congratulations, {name}!"],
+  "new baby":["The newest neighbor has arrived! Welcome to the world, {name}!","Small person, big welcome. Hello, {name}!","Special delivery! This yard is ready for its newest little fan."],
+  anniversary:["Still crazy about each other after all these years. Happy anniversary!","Love lives here, and the yard wants everyone to know.","Here's to the next chapter. Happy anniversary, {name}!"],
+  "welcome home":["There's no place like home, and this yard knows it. Welcome home, {name}!","The porch light is on and the lawn is dressed up. Welcome home!","Home sweet home just got sweeter. Welcome back, {name}!"],
+  retirement:["No more alarm clocks! Happy retirement, {name}!","Officially off the clock and on to the good stuff.","Clocked out for good. Happy retirement, {name}!"],
+  holiday:["Deck the lawn! Spreading some front-yard cheer.","The neighbors are smiling, and so is this yard.","Our favorite kind of decorating: the kind that makes people honk and wave."],
+  other:["Surprise! This lawn has something to say.","Every celebration deserves a front-yard announcement.","Making the neighbors smile, one yard at a time."]
+};
+const TEAM_SAYINGS = {
+  "Detroit Lions":"One Pride, one very proud yard!","Detroit Tigers":"This yard is roaring for the Tigers!","Detroit Pistons":"Nothing but net in this front yard!",
+  "Detroit Red Wings":"Hockeytown has a new address!","Detroit City FC":"Le Rouge is taking over the front yard!","Michigan Panthers":"Panthers fans, pounce on by!",
+  "Michigan Wolverines":"Go Blue! This yard is maize and blue all the way.","Michigan State Spartans":"Go Green! Go White! This yard is Spartan strong."
+};
+function postSayings(j){
+  const occ = (j.occasion||"").trim().toLowerCase();
+  const list = [...(SAYINGS[occ] || SAYINGS.other)];
+  if(j.team) list.splice(1, 0, TEAM_SAYINGS[j.team] || `Repping the ${j.team} loud and proud!`);
+  return list;
+}
+function fillName(t, name){
+  if(name) return t.replace(/\{name\}/g, name);
+  return t.replace(/\{name\}'s/g, "someone's").replace(/,? \{name\}/g, "");
+}
+const tag = t => "#" + String(t||"").replace(/[^A-Za-z0-9]/g,"");
+function buildPost(j, i){
+  const s = store.settings, list = postSayings(j);
+  const name = String(j.honoree||"").split(",")[0].trim();
+  const saying = fillName(list[((i||0) % list.length + list.length) % list.length], name);
+  const tags = ["#YardCard", "#YardSign", j.occasion ? tag(j.occasion) : "", j.team ? tag(j.team) : "", s.area ? tag(s.area) : ""].filter(t=>t.length>1);
+  const biz = s.name || "us";
+  return `${saying}\n\nWant a yard card for your celebration? Message ${biz}${s.phone ? " or call " + s.phone : ""}.\n\n${[...new Set(tags)].join(" ")}`;
+}
+function needsPost(j){
+  return !!photoSrc(j) && j.postOk && !j.posted && !j.postSkip && (j.status==="setup" || j.status==="complete");
+}
+
 function needsPickupReminder(j){
   if(j.status!=="setup" || (j.emails && j.emails.pickup) || j.pickupSkip) return false;
   const td = toDate(j.takedownAt); if(!td || isNaN(td) || td <= Date.now()) return false;
@@ -609,8 +660,17 @@ function viewJobs(){
         <button type="button" class="btn ghost" data-crewskip="${esc(j.id)}">Skip</button>
       </div>`).join("")}
     </section>` : "";
+  const postDue = jobs.filter(needsPost).sort((a,b)=>String(b.setupDoneAt||b.setupAt).localeCompare(String(a.setupDoneAt||a.setupAt)));
+  const postBanner = postDue.length ? `<section class="banner" aria-label="Posts ready">
+      <b>${postDue.length===1?"1 post is ready to review":postDue.length+" posts are ready to review"}</b>
+      ${postDue.map(j=>`<div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <div style="flex:1;min-width:150px"><b>${esc(j.honoree||j.customerName)}</b><br><span class="fine">${esc(j.occasion||"Yard card")}</span></div>
+        <button type="button" class="btn pop" data-post="${esc(j.id)}">Review post</button>
+        <button type="button" class="btn ghost" data-postskip="${esc(j.id)}">Skip</button>
+      </div>`).join("")}
+    </section>` : "";
   const setupNote = s.name ? "" : `<div class="banner"><b>Add your business details</b> so emails carry your name, payment info and review links. <button type="button" class="btn ghost" data-go2="settings" style="padding:4px 8px;margin-left:4px">Set up</button></div>`;
-  return topBar(s.name || "Yard Card Jobs", `${takedowns.length} in yards · ${upcoming.length} upcoming`) + modeBanner() + crewBanner + dueBanner + setupNote + `
+  return topBar(s.name || "Yard Card Jobs", `${takedowns.length} in yards · ${upcoming.length} upcoming`) + modeBanner() + crewBanner + dueBanner + postBanner + setupNote + `
     <div class="sec"><h2>Take-downs</h2><span class="count">${takedowns.length}</span></div>
     <div class="list">${takedowns.length ? takedowns.map(j=>card(j,"Take down",j.takedownAt)).join("") : `<div class="empty">Nothing in a yard right now.</div>`}</div>
     <div class="sec"><h2>Set-ups coming up</h2><span class="count">${setupSoon.length} in next 36 hr</span></div>
@@ -645,9 +705,11 @@ function viewForm(j){
     <fieldset><legend>Customer</legend>
       <label>Customer name<input id="f-customer" name="customerName" required value="${esc(j.customerName)}" autocomplete="off"></label>
       <div class="two">
-        <label>Email<input id="f-email" name="email" type="email" inputmode="email" required value="${esc(j.email)}" autocomplete="off"></label>
+        <label>Email<input id="f-email" name="email" type="email" inputmode="email" value="${esc(j.email)}" autocomplete="off"></label>
         <label>Phone<input id="f-phone" name="phone" type="tel" inputmode="tel" value="${esc(j.phone)}" autocomplete="off"></label>
       </div>
+      <label>Best way to reach them<select id="f-contact" name="contact">${Object.entries(CHANNELS).map(([k,v])=>`<option value="${k}" ${chanOf(j)===k?"selected":""}>${v}</option>`).join("")}</select></label>
+      <label id="f-msgr-wrap" ${chanOf(j)==="messenger"?"":"hidden"}>Their Messenger name or link<input id="f-messenger" name="messenger" value="${esc(j.messenger)}" placeholder="facebook.com/their.name" autocomplete="off"></label>
       <label>Set-up address<input id="f-address" name="address" required value="${esc(j.address)}" autocomplete="off"></label>
     </fieldset>
     <fieldset><legend>The sign</legend>
@@ -659,6 +721,7 @@ function viewForm(j){
       <label>Message on the lawn<input id="f-message" name="message" value="${esc(j.message)}" placeholder="HAPPY 10TH MAYA"></label>
       <label>Team theme (optional)${teamSelect(j.team||"")}</label>
       ${localTeams().length?"":`<p class="fine" style="margin:-6px 0 0">Add the schools and teams in your area under <b>Business → Teams</b>.</p>`}
+      <label class="chk"><input type="checkbox" id="f-postok" name="postOk" ${j.postOk?"checked":""}><span>OK to post a photo of this sign on our social media</span></label>
       <label>Summary of the customer's request<textarea id="f-request" name="request" placeholder="Colors, theme, extras, gate code, where to place it…">${esc(j.request)}</textarea></label>
     </fieldset>
     <fieldset><legend>Times</legend>
@@ -737,16 +800,24 @@ function viewDetail(j){
   const st = stage(j), t = totals(j), s = store.settings;
   const letters = (j.message||j.honoree||"YAY").replace(/[^A-Za-z0-9]/g,"").slice(0,4).toUpperCase().split("");
   const stepCls = n => n < st || j.status==="complete" ? "done" : n===st ? "now" : "";
-  const sentLine = (k) => j.emails && j.emails[k] ? `<div class="sent">✓ ${j.emails[k].draft?"Saved as Gmail draft":j.emails[k].app?"Opened in your email app":"Emailed"} ${esc(fmtWhen(j.emails[k].at))}</div>` : "";
+  const sentLine = (k) => j.emails && j.emails[k] ? `<div class="sent">✓ ${j.emails[k].via==="text"?"Opened in Messages":j.emails[k].via==="messenger"?"Copied for Messenger":j.emails[k].via==="share"?"Shared":j.emails[k].draft?"Saved as Gmail draft":j.emails[k].app?"Opened in your email app":"Emailed"} ${esc(fmtWhen(j.emails[k].at))}</div>` : "";
+  const noun = chanNoun(j), to = chanOf(j)==="email" ? (j.email||"the customer") : (j.customerName||"the customer");
+  const postCard = photoSrc(j) && st>1 ? `<section class="card">
+      <h3>Social media post</h3>
+      ${j.posted ? `<div class="sent">✓ Posted ${esc(fmtWhen(j.posted.at))}</div>` : ""}
+      ${j.postOk ? `<p class="hint">A ready-to-post caption with the yard photo. Review it, then share it to your pages.</p>
+      <div class="row"><button type="button" class="btn pop" data-post="${esc(j.id)}">${j.posted?"Post again":"Review post"}</button></div>`
+      : `<p class="hint">The customer hasn't said it's OK to post this photo. If they have, tap Edit below and check the box.</p>`}
+    </section>` : "";
 
   let action = "";
   if(st===1){
     action = `<section class="card action">
       <h3>Confirm the booking</h3>
-      <p class="hint">Emails ${esc(j.email||"the customer")} a summary of their request with the set-up and take-down times.</p>
+      <p class="hint">Sends ${esc(to)} a summary of their request with the set-up and take-down times.</p>
       ${sentLine("confirmation")}
       <div class="row">
-        <button type="button" class="btn pop" data-mail="confirmation">${j.emails&&j.emails.confirmation?"Send again":"Preview confirmation email"}</button>
+        <button type="button" class="btn pop" data-mail="confirmation">${j.emails&&j.emails.confirmation?"Send again":"Preview confirmation "+noun}</button>
       </div>
       <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
       <h3>Sign is up?</h3>
@@ -755,7 +826,7 @@ function viewDetail(j){
       <input id="photo-in" type="file" accept="image/*" capture="environment" hidden>
       ${photoSrc(j)?`<div class="photo"><img src="${esc(photoSrc(j))}" alt="Finished yard card for ${esc(j.honoree||j.customerName)}"></div>`:""}
       <div class="row"><button type="button" class="btn primary wide" data-act="setup" ${photoSrc(j)?"":"disabled"}>Mark set up</button></div>
-      ${photoSrc(j)?"":`<p class="fine" style="margin:6px 0 0">Add the photo first — it goes into the customer's email.</p>`}
+      ${photoSrc(j)?"":`<p class="fine" style="margin:6px 0 0">Add the photo first. It goes to the customer, and into your social media post.</p>`}
     </section>`;
   }else if(st===2){
     const td = toDate(j.takedownAt), overdue = td && td <= Date.now();
@@ -766,7 +837,7 @@ function viewDetail(j){
       ${needsPickupReminder(j)?`<div class="banner warn" style="margin-top:8px"><b>Pick-up is coming up.</b> Send the customer a reminder below.</div>`:""}
       <div class="photo"><img src="${esc(photoSrc(j))}" alt="Finished yard card for ${esc(j.honoree||j.customerName)}"></div>
       <div class="row">
-        <button type="button" class="btn pop" data-mail="setup">${j.emails&&j.emails.setup?"Resend photo email":"Email customer the photo"}</button>
+        <button type="button" class="btn pop" data-mail="setup">${j.emails&&j.emails.setup?"Resend photo "+noun:"Send customer the photo"}</button>
       </div>
       ${sentLine("setup")}
       <div class="row">
@@ -777,7 +848,7 @@ function viewDetail(j){
       ${sentLine("reminder")}
       <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
       <h3>Sign is picked up?</h3>
-      <p class="hint">Marks the job done and opens the invoice + review request email.</p>
+      <p class="hint">Marks the job done and opens the invoice and review request.</p>
       <div class="row"><button type="button" class="btn primary wide" data-act="takedown">Mark taken down</button></div>
     </section>`;
   }else{
@@ -785,7 +856,7 @@ function viewDetail(j){
       <h3>Invoice & review request</h3>
       <p class="hint">Invoice ${esc(invoiceNo(j))} · balance ${money(t.due)}. Includes links to ${["facebook","instagram","google"].filter(k=>s[k]).map(k=>k[0].toUpperCase()+k.slice(1)).join(", ")||"your review pages (add them under Business)"}.</p>
       ${sentLine("final")}
-      <div class="row"><button type="button" class="btn pop wide" data-mail="final">${j.emails&&j.emails.final?"Send again":"Preview invoice email"}</button></div>
+      <div class="row"><button type="button" class="btn pop wide" data-mail="final">${j.emails&&j.emails.final?"Send again":"Preview invoice "+noun}</button></div>
       ${photoSrc(j)?`<div class="photo"><img src="${esc(photoSrc(j))}" alt="Finished yard card for ${esc(j.honoree||j.customerName)}"></div>`:""}
     </section>`;
   }
@@ -804,13 +875,15 @@ function viewDetail(j){
       <li class="${stepCls(3)}"><span class="n">3</span>Taken down</li>
     </ol>
     ${action}
+    ${postCard}
     ${j.status!=="complete" ? crewCard(j) : ""}
     <section class="card">
       <h3>Booking</h3>
       <dl class="kv">
         <dt>Set up</dt><dd>${esc(fmtWhen(j.setupAt))}</dd>
         <dt>Take down</dt><dd>${esc(fmtWhen(j.takedownAt))}</dd>
-        <dt>Email</dt><dd>${esc(j.email)}</dd>
+        <dt>Reach by</dt><dd>${esc(CHANNELS[chanOf(j)])}${chanOf(j)==="messenger"&&j.messenger?" · "+esc(j.messenger):""}</dd>
+        ${j.email?`<dt>Email</dt><dd>${esc(j.email)}</dd>`:""}
         ${j.phone?`<dt>Phone</dt><dd>${esc(j.phone)}</dd>`:""}
         <dt>Address</dt><dd>${esc(j.address)}</dd>
         <dt>Request</dt><dd>${esc(j.request||"—")}</dd>
@@ -952,6 +1025,8 @@ function bind(j){
   app.querySelectorAll("[data-remind]").forEach(b=>b.onclick=()=>{ const jj = store.jobs.find(x=>x.id===b.dataset.remind); if(jj) openMail("pickup", jj); });
   app.querySelectorAll("[data-crewopen]").forEach(b=>b.onclick=()=>{ const jj = store.jobs.find(x=>x.id===b.dataset.crewopen); if(jj) openCrew(jj); });
   app.querySelectorAll("[data-crewskip]").forEach(b=>b.onclick=async()=>{ const jj = store.jobs.find(x=>x.id===b.dataset.crewskip); if(!jj) return; try{ await store.saveJob({...jj, crewSkip:true}); toast("Crew text skipped"); render(); }catch(e){ toast("Couldn't save — try again"); } });
+  app.querySelectorAll("[data-post]").forEach(b=>b.onclick=()=>{ const jj = store.jobs.find(x=>x.id===b.dataset.post); if(jj) openPost(jj); });
+  app.querySelectorAll("[data-postskip]").forEach(b=>b.onclick=async()=>{ const jj = store.jobs.find(x=>x.id===b.dataset.postskip); if(!jj) return; try{ await store.saveJob({...jj, postSkip:true}); toast("Post skipped"); render(); }catch(e){ toast("Couldn't save — try again"); } });
   app.querySelectorAll("[data-skip]").forEach(b=>b.onclick=async()=>{ const jj = store.jobs.find(x=>x.id===b.dataset.skip); if(!jj) return; try{ await store.saveJob({...jj, pickupSkip:true}); toast("Reminder skipped"); render(); }catch(e){ toast("Couldn't save — try again"); } });
 
   const form = $("#jobform");
@@ -961,12 +1036,14 @@ function bind(j){
     $("#add-addon").onclick = ()=>{ $("#addons").insertAdjacentHTML("beforeend", addonRow(undefined, n++)); };
     form.addEventListener("click", e=>{ if(e.target.closest("[data-rm-addon]")){ e.target.closest("[data-addon]").remove(); recalc(); }});
     form.addEventListener("input", recalc);
+    $("#f-contact").onchange = e=>{ $("#f-msgr-wrap").hidden = e.target.value!=="messenger"; };
     form.onsubmit = async e=>{
       e.preventDefault();
       const data = readForm(form), err = $("#form-err");
       const missing = [];
       if(!data.customerName) missing.push("customer name");
-      if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(data.email||"")) missing.push("a valid email");
+      if((data.contact==="email" || data.email) && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(data.email||"")) missing.push("a valid email");
+      if(data.contact==="text" && !data.phone) missing.push("a phone number to text");
       if(!data.address) missing.push("address");
       if(!data.setupAt) missing.push("set-up time");
       if(!data.takedownAt) missing.push("take-down time");
@@ -1087,9 +1164,10 @@ function bind(j){
 }
 function readForm(form){
   const d = {};
-  ["customerName","email","phone","address","occasion","honoree","message","team","request","setupAt","takedownAt","price","deposit"].forEach(k=>{
+  ["customerName","email","phone","contact","messenger","address","occasion","honoree","message","team","request","setupAt","takedownAt","price","deposit"].forEach(k=>{
     const el = form.elements[k]; d[k] = el ? el.value.trim() : "";
   });
+  d.postOk = !!(form.elements.postOk && form.elements.postOk.checked);
   d.addons = [...form.querySelectorAll("[data-addon]")].map(r=>({desc:r.querySelector('[name="addon-desc"]').value.trim(), amount:r.querySelector('[name="addon-amt"]').value})).filter(a=>a.desc||a.amount);
   return d;
 }
@@ -1255,6 +1333,55 @@ function openCrew(j0){
   };
 }
 
+/* ---------- social post sheet ---------- */
+function openPost(j0){
+  const root = $("#sheet-root"), s = store.settings;
+  const cur = ()=>store.jobs.find(x=>x.id===j0.id) || j0;
+  let idx = Number(cur().postIdx)||0;
+  const pages = [["Facebook",s.facebook],["Instagram",s.instagram]].filter(x=>x[1]);
+  root.innerHTML = `<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-h">
+    <h3 id="sheet-h">Post about this job</h3>
+    <div class="photo"><img src="${esc(photoSrc(cur()))}" alt="Yard card for ${esc(cur().honoree||cur().customerName)}"></div>
+    <label style="margin-top:10px">Caption<textarea id="p-text" rows="7"></textarea></label>
+    <div class="row"><button type="button" class="btn" id="p-next">Try another saying</button></div>
+    <div id="p-status" class="status" hidden></div>
+    <div class="row">
+      ${navigator.share ? `<button type="button" class="btn primary" id="p-share">Share with photo</button>` : ""}
+      <button type="button" class="btn ${navigator.share?"ghost":"primary"}" id="p-copy">Copy caption</button>
+      ${pages.map(p=>`<a class="btn ghost" href="${esc(p[1])}" target="_blank" rel="noopener">Open ${esc(p[0])}</a>`).join("")}
+    </div>
+    <div class="row">
+      <button type="button" class="btn" id="p-done">I posted it</button>
+      <button type="button" class="btn ghost" id="p-close">Close</button>
+    </div>
+  </div></div>`;
+  const ta = $("#p-text"), st = $("#p-status");
+  ta.value = cur().postText || buildPost(cur(), idx);
+  const save = async (extra)=>{ try{ await store.saveJob({...cur(), postText: ta.value, postIdx: idx, ...(extra||{})}); }catch(e){} };
+  $("#p-next").onclick = ()=>{ idx++; ta.value = buildPost(cur(), idx); };
+  const copy = async ()=>{ try{ await navigator.clipboard.writeText(ta.value); return true; }catch(e){ return false; } };
+  $("#p-copy").onclick = async ()=>{ if(await copy()) toast("Caption copied"); else { ta.select(); toast("Caption selected — copy it"); } };
+  const close = ()=>{ save(); root.innerHTML=""; render(); };
+  $("#p-close").onclick = close;
+  $("#scrim").onclick = e=>{ if(e.target.id==="scrim") close(); };
+  $("#p-done").onclick = async ()=>{ await save({posted:{at:new Date().toISOString()}}); toast("Marked as posted"); root.innerHTML=""; render(); };
+  const sh = $("#p-share");
+  if(sh) sh.onclick = async ()=>{
+    // Facebook and Instagram often drop shared words, so copy the caption first for pasting.
+    await copy();
+    try{
+      const j = cur(), blob = await (await fetch(photoSrc(j))).blob();
+      const file = new File([blob], ((j.honoree||j.customerName||"yard-card").replace(/[^A-Za-z0-9]+/g,"-") || "yard-card") + "-yard-card.jpg", {type:"image/jpeg"});
+      if(!(navigator.canShare && navigator.canShare({files:[file]}))) throw {code:"no_share"};
+      await navigator.share({files:[file], text: ta.value});
+      st.hidden = false; st.className = "status ok"; st.textContent = "The caption is copied too. If it's missing in the post, press and hold to paste it. Then tap I posted it.";
+    }catch(e){
+      if(e && e.name==="AbortError") return;
+      st.hidden = false; st.className = "status err"; st.textContent = "This phone can't share the photo from here. The caption is copied: open your page and add the photo from your camera roll.";
+    }
+  };
+}
+
 /* ---------- photos ---------- */
 async function shrink(file, max=1600){
   const url = URL.createObjectURL(file);
@@ -1384,26 +1511,40 @@ function openMail(kind, j){
   const m = buildMail(kind, j);
   const root = $("#sheet-root");
   const titles = {confirmation:"Booking confirmation", setup:"Set-up photo email", reminder:"Reminder to yourself", pickup:"Pick-up reminder to customer", final:"Invoice & review request"};
-  const noTo = !m.to.length;
+  const ch = kind==="reminder" ? "email" : chanOf(j), chat = ch!=="email";
+  if(chat) titles.setup = "Set-up photo";
+  if(chat){ const fix = t => String(t||"").replace(/this email/g, "this message"); m.intro = fix(m.intro); m.sections.forEach(x=>x.note = fix(x.note)); }
+  if(chat && kind==="setup" && !(navigator.share && photoSrc(j))) m.intro = m.intro.replace(" — a photo is attached", "");
+  const hasShare = !!(navigator.share && photoSrc(j));
+  const mHref = messengerHref(j.messenger);
+  const chatTo = ch==="text" ? (j.phone || "pick a contact in Messages") : (j.messenger || j.customerName || "the customer");
+  const noTo = !m.to.filter(Boolean).length;
   root.innerHTML = `<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-h">
     <h3 id="sheet-h">${titles[kind]}</h3>
-    <div class="to">To: <b>${esc(m.to.join(", ")||"— add your email under Business")}</b>${m.attach?(photoSrc(j)?" · 📎 yard photo attached":" · no photo yet"):""}</div>
-    <label>Subject<input id="m-subject" value="${esc(m.subject)}"></label>
+    <div class="to">${chat ? `${ch==="text"?"Text":"Messenger"} to: <b>${esc(chatTo)}</b>` : `To: <b>${esc(m.to.join(", ")||"— add your email under Business")}</b>${m.attach?(photoSrc(j)?" · 📎 yard photo attached":" · no photo yet"):""}`}</div>
+    <label ${chat?"hidden":""}>Subject<input id="m-subject" value="${esc(m.subject)}"></label>
     <label style="margin-top:10px">Opening message<textarea id="m-intro" rows="5">${esc(m.intro)}</textarea></label>
-    <div class="mail" id="m-preview">${mailHtml(m, true)}</div>
+    <div class="mail" id="m-preview" ${chat?'style="white-space:pre-wrap"':""}>${chat ? esc(mailText(m)) : mailHtml(m, true)}</div>
     <div id="m-status" class="status" hidden></div>
+    ${chat ? `<div class="row">
+      ${ch==="text" ? `<a class="btn primary" id="m-sms" href="#">Text it</a>` : `<button type="button" class="btn primary" id="m-msgr">${mHref?"Copy and open Messenger":"Copy message"}</button>`}
+      ${hasShare ? `<button type="button" class="btn pop" id="m-cshare">Share with photo</button>` : ""}
+      <button type="button" class="btn ghost" id="m-close">Close</button>
+    </div>
+    ${j.email ? `<details style="margin-top:10px"><summary>Email instead</summary>` : `<div hidden>`}` : ""}
     <div class="row">
       ${window.claude ? `<button type="button" class="btn primary" id="m-send" ${noTo?"disabled":""}>Send with Gmail</button>
       <button type="button" class="btn" id="m-draft" ${noTo?"disabled":""}>Save as Gmail draft</button>` : `<button type="button" class="btn primary" id="m-open" ${noTo?"disabled":""}>Open in my email app</button>
       ${m.attach && photoSrc(j) ? `<button type="button" class="btn" id="m-share">Share with photo</button>` : ""}`}
       <button type="button" class="btn ghost" id="m-copy">Copy text</button>
-      <button type="button" class="btn ghost" id="m-close">Close</button>
+      ${chat ? "" : `<button type="button" class="btn ghost" id="m-close">Close</button>`}
     </div>
+    ${chat ? (j.email ? `</details>` : `</div>`) : ""}
   </div></div>`;
   const close = ()=>{ root.innerHTML=""; };
   $("#m-close").onclick = close;
   $("#scrim").onclick = e=>{ if(e.target.id==="scrim") close(); };
-  const sync = ()=>{ m.subject = $("#m-subject").value; m.intro = $("#m-intro").value; $("#m-preview").innerHTML = mailHtml(m, true); };
+  const sync = ()=>{ m.subject = $("#m-subject").value; m.intro = $("#m-intro").value; if(chat) $("#m-preview").textContent = mailText(m); else $("#m-preview").innerHTML = mailHtml(m, true); if($("#m-sms")) $("#m-sms").href = smsHref(j.phone, mailText(m)); };
   $("#m-subject").oninput = sync; $("#m-intro").oninput = sync;
   $("#m-copy").onclick = async ()=>{
     sync();
@@ -1440,6 +1581,40 @@ function openMail(kind, j){
     if(kind==="confirmation" && fresh.status==="booked") up.status = "confirmed";
     await store.saveJob(up);
   };
+  const markVia = async (via)=>{
+    const fresh = store.jobs.find(x=>x.id===j.id) || j;
+    const up = {...fresh, emails:{...(fresh.emails||{}), [kind]:{at:new Date().toISOString(), via}}};
+    if(kind==="confirmation" && fresh.status==="booked") up.status = "confirmed";
+    try{ await store.saveJob(up); }catch(e){}
+  };
+  if(chat){
+    sync();
+    const st = $("#m-status");
+    if($("#m-sms")) $("#m-sms").onclick = ()=>{ sync(); markVia("text"); };
+    if($("#m-msgr")) $("#m-msgr").onclick = async ()=>{
+      sync(); let ok = true;
+      try{ await navigator.clipboard.writeText(mailText(m)); }catch(e){ ok = false; }
+      await markVia("messenger");
+      st.hidden = false; st.className = ok ? "status ok" : "status err";
+      st.textContent = ok ? (mHref ? "Message copied. Messenger is opening: press and hold in the chat to paste, then send." : "Message copied. Open Messenger, find " + (j.customerName||"the customer") + ", then paste and send.") : "Couldn't copy here. Select the message in the box above and copy it.";
+      if(ok && mHref) window.open(mHref, "_blank", "noopener");
+    };
+    if($("#m-cshare")) $("#m-cshare").onclick = async ()=>{
+      sync();
+      try{ await navigator.clipboard.writeText(mailText(m)); }catch(e){}
+      try{
+        const blob = await (await fetch(photoSrc(j))).blob();
+        const file = new File([blob], ((j.honoree||j.customerName||"yard-card").replace(/[^A-Za-z0-9]+/g,"-") || "yard-card") + "-yard-card.jpg", {type:"image/jpeg"});
+        if(!(navigator.canShare && navigator.canShare({files:[file]}))) throw {code:"no_share"};
+        await navigator.share({files:[file], text: mailText(m)});
+        await markVia("share");
+        st.hidden = false; st.className = "status ok"; st.textContent = "Pick " + (ch==="text"?"Messages":"Messenger") + " and the customer. The message is copied too, in case it doesn't come along.";
+      }catch(e){
+        if(e && e.name==="AbortError") return;
+        st.hidden = false; st.className = "status err"; st.textContent = "This phone can't share the photo from here. Send the message, then add the photo from your camera roll.";
+      }
+    };
+  }
   if($("#m-send")){ $("#m-send").onclick = ()=>doSend(false); $("#m-draft").onclick = ()=>doSend(true); }
   if($("#m-open")) $("#m-open").onclick = async ()=>{
     sync();
